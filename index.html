@@ -3,9 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Calories">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#2e7d4f">
+<link rel="apple-touch-icon" href="icon-tracker.png">
+<link rel="icon" type="image/png" href="icon-tracker.png">
 <title>Calorie Tracker</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 12px; line-height: 1.4; }
+  body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 12px 12px calc(40px + env(safe-area-inset-bottom)); line-height: 1.4; }
   h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   input, button { font: inherit; padding: 6px; margin: 2px 0; }
   input { width: 100%; box-sizing: border-box; }
@@ -53,13 +60,12 @@
 <h2>Log</h2>
 <div id="log"></div>
 
-<h2>Data</h2>
-<div class="row">
-  <button id="csvBtn">Export CSV</button>
-  <button id="jsonBtn">Export backup</button>
-  <button id="importBtn">Import backup</button>
-</div>
-<input id="importFile" type="file" accept=".json,application/json" hidden>
+<h2>Cloud file</h2>
+<p><small>Keep one file, food-log.json, in iCloud Drive, OneDrive or similar. Load it first, make your changes, then save it back.</small></p>
+<div class="row"><button id="saveCloud">Save</button><button id="loadCloud">Load</button></div>
+<small id="lastSaved"></small>
+<input id="loadFile" type="file" accept=".json,application/json" hidden>
+<p><button id="csvBtn">Export CSV</button></p>
 
 <p><small>Food data from <a href="https://world.openfoodfacts.org">Open Food Facts</a>. Everything is stored on this device.</small></p>
 
@@ -88,14 +94,14 @@ function render() {
       <button onclick="del(${i})">Delete</button></div>`).join('') : '<p>Nothing logged yet today.</p>';
 }
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-window.del = i => { log[today()].splice(i, 1); save('log', log); render(); };
+window.del = i => { sync.forget(log[today()].splice(i, 1)[0]); save('log', log); render(); };
 
 // ---- add entry ----
 $('addBtn').onclick = () => {
   const name = $('name').value.trim(), g = +$('grams').value;
   if (!name || !g) { $('msg').textContent = 'Enter a name and an amount in grams.'; return; }
   const s = g / 100;
-  const entry = { name, grams: g, kcal: (+$('kcal').value || 0) * s, p: (+$('p').value || 0) * s, c: (+$('c').value || 0) * s, f: (+$('f').value || 0) * s };
+  const entry = { id: uid(), name, grams: g, kcal: (+$('kcal').value || 0) * s, p: (+$('p').value || 0) * s, c: (+$('c').value || 0) * s, f: (+$('f').value || 0) * s };
   (log[today()] ||= []).push(entry);
   save('log', log); render();
   ['name', 'kcal', 'p', 'c', 'f', 'barcode'].forEach(id => $(id).value = '');
@@ -235,28 +241,75 @@ function download(filename, text, type) {
 }
 $('csvBtn').onclick = () => {
   const q = v => `"${String(v).replace(/"/g, '""')}"`;
-  const rows = ['date,name,grams,kcal,protein_g,carbs_g,fat_g'];
+  const rows = ['date,name,grams,kcal,protein_g,carbs_g,fat_g,id'];
   Object.keys(log).sort().forEach(d => log[d].forEach(e =>
-    rows.push([d, q(e.name), e.grams, e.kcal.toFixed(1), e.p.toFixed(1), e.c.toFixed(1), e.f.toFixed(1)].join(','))));
+    rows.push([d, q(e.name), e.grams, e.kcal.toFixed(1), e.p.toFixed(1), e.c.toFixed(1), e.f.toFixed(1), e.id].join(','))));
   download(`food-log-${today()}.csv`, rows.join('\n'), 'text/csv');
 };
-$('jsonBtn').onclick = () =>
-  download(`calorie-backup-${today()}.json`, JSON.stringify({ log, foodCache: cache }, null, 2), 'application/json');
-$('importBtn').onclick = () => $('importFile').click();
-$('importFile').onchange = async e => {
-  const file = e.target.files[0]; if (!file) return;
-  try {
-    const d = JSON.parse(await file.text());
-    Object.assign(cache, d.foodCache || {}); save('foodCache', cache);
-    for (const day in d.log || {}) {
-      const have = new Set((log[day] ||= []).map(x => JSON.stringify(x)));
-      d.log[day].forEach(x => { if (!have.has(JSON.stringify(x))) log[day].push(x); });
-    }
-    save('log', log); render(); $('msg').textContent = 'Backup imported and merged.';
-  } catch { $('msg').textContent = 'That file isn\'t a valid backup.'; }
-  e.target.value = '';
-};
+// ---- cloud file sync: one shared food-log.json that both pages can load and save ----
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+function makeSync({ name, get, persist, after, say }) {
+  let deleted = load(name + 'Deleted', []);
+  const flat = () => { const L = get(), out = []; for (const d of Object.keys(L).sort()) L[d].forEach(e => out.push({ ...e, date: d })); return out; };
+  const ensureIds = () => { const L = get(); let ch = false; for (const d in L) L[d].forEach(e => { if (!e.id) { e.id = uid(); ch = true; } }); if (ch) persist(); };
+  const forget = e => { if (e && e.id && !deleted.includes(e.id)) { deleted.push(e.id); save(name + 'Deleted', deleted); } };
+  const merge = data => {
+    const L = get(), gone = new Set([...deleted, ...(data.deleted || [])]);
+    deleted = [...gone]; save(name + 'Deleted', deleted);
+    const have = new Set(flat().map(e => e.id)); let added = 0;
+    (data.entries || []).forEach(e => {
+      if (e.id && e.date && !gone.has(e.id) && !have.has(e.id)) { const { date, ...rest } = e; (L[date] ||= []).push(rest); have.add(e.id); added++; }
+    });
+    for (const d in L) { L[d] = L[d].filter(e => !gone.has(e.id)); if (!L[d].length) delete L[d]; }
+    persist(); after(); return added;
+  };
+  const payload = () => JSON.stringify({ app: 'food-log', version: 2, savedAt: new Date().toISOString(), entries: flat(), deleted }, null, 2);
 
+  // remember the chosen file between visits (desktop Chrome/Edge only)
+  const idb = () => new Promise((res, rej) => { const r = indexedDB.open('foodlog-handles', 1); r.onupgradeneeded = () => r.result.createObjectStore('h'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const getHandle = async () => { try { const db = await idb(); return await new Promise(res => { const q = db.transaction('h').objectStore('h').get('file'); q.onsuccess = () => res(q.result); q.onerror = () => res(null); }); } catch { return null; } };
+  const putHandle = async h => { try { const db = await idb(); db.transaction('h', 'readwrite').objectStore('h').put(h, 'file'); } catch {} };
+  const stamp = () => { const t = load(name + 'Last', 0), el = $('lastSaved'); if (el) el.textContent = t ? 'Last saved: ' + new Date(t).toLocaleString() : 'Not saved yet.'; };
+  const done = msg => { save(name + 'Last', Date.now()); stamp(); say(msg); };
+
+  async function saveFile() {
+    const fname = 'food-log.json';
+    try {
+      if (window.showSaveFilePicker) {
+        let h = await getHandle();
+        if (h && (await h.requestPermission({ mode: 'readwrite' })) !== 'granted') h = null;
+        if (!h) { h = await showSaveFilePicker({ suggestedName: fname, types: [{ description: 'Food log', accept: { 'application/json': ['.json'] } }] }); await putHandle(h); }
+        try { merge(JSON.parse(await (await h.getFile()).text())); } catch {}   // pick up anything already in the file first
+        const w = await h.createWritable(); await w.write(payload()); await w.close();
+        return done('Saved to ' + h.name + '.');
+      }
+      const file = new File([payload()], fname, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file] });
+        return done('Choose Save to Files, pick your cloud folder, and tap Replace if asked.');
+      }
+      const url = URL.createObjectURL(new Blob([payload()], { type: 'application/json' }));
+      const a = document.createElement('a'); a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      done('Downloaded ' + fname + '. Replace the old copy in your cloud folder.');
+    } catch (e) { if (e.name !== 'AbortError') say('Save failed: ' + e.message); }
+  }
+  $('saveCloud').onclick = saveFile;
+  $('loadCloud').onclick = () => $('loadFile').click();
+  $('loadFile').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+      const d = JSON.parse(await f.text()); if (!Array.isArray(d.entries)) throw 0;
+      const n = merge(d); say(`Loaded. Added ${n} new item${n === 1 ? '' : 's'}.`);
+    } catch { say('That isn\'t a food log file.'); }
+    e.target.value = '';
+  };
+  stamp();
+  return { ensureIds, forget, isGone: id => deleted.includes(id), merge, payload };
+}
+
+const sync = makeSync({ name: 'tracker', get: () => log, persist: () => save('log', log), after: render, say: t => $('msg').textContent = t });
+sync.ensureIds();
 render();
 </script>
 </body>
