@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Food Calendar</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 520px; margin: 0 auto; padding: 12px; line-height: 1.4; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  button { font: inherit; padding: 6px 10px; cursor: pointer; }
+  .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .dow { text-align: center; font-size: .75rem; color: #777; }
+  .day { min-height: 52px; border: 1px solid #ccc; border-radius: 4px; padding: 3px; font-size: .8rem; cursor: pointer; background: none; color: inherit; text-align: left; }
+  .day small { display: block; color: #3a7; }
+  .day.today { border: 2px solid #36c; }
+  .day.sel { background: #cde; color: #000; }
+  .day.sel small { color: #164; }
+  .day.empty { border: none; cursor: default; }
+  .item { display: flex; justify-content: space-between; border-bottom: 1px solid #ccc; padding: 6px 0; gap: 8px; }
+  .item small { color: #666; display: block; }
+  #msg { color: #a30; min-height: 1.2em; }
+  label.chk { display: block; font-size: .9rem; margin: 6px 0; }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } .day, .item { border-color: #444; } .item small, .dow { color: #aaa; } button { background: #222; color: #eee; border: 1px solid #555; } .day.sel { background: #357; color: #fff; } .day.sel small { color: #9fc; } }
+</style>
+</head>
+<body>
+<h1>Food Calendar</h1>
+
+<div class="nav">
+  <button id="prev" aria-label="Previous month">&lt;</button>
+  <strong id="monthLabel"></strong>
+  <button id="next" aria-label="Next month">&gt;</button>
+</div>
+<div class="grid" id="dows"></div>
+<div class="grid" id="grid"></div>
+<p><button id="todayBtn">Go to today</button></p>
+
+<h2 id="dayTitle"></h2>
+<div id="totals"></div>
+<div id="entries"></div>
+
+<h2>Import food CSV</h2>
+<p><small>Use the CSV exported from the calorie tracker.</small></p>
+<label class="chk"><input type="checkbox" id="useSelected"> Add every row to the selected day instead of the date in the file</label>
+<button id="importBtn">Choose CSV file</button>
+<input id="csvFile" type="file" accept=".csv,text/csv" hidden>
+<div id="msg"></div>
+<p><button id="clearDay">Clear selected day</button></p>
+
+<script>
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2, '0');
+const key = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;   // local date, not UTC
+const todayKey = () => key(new Date());
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+let days = load('calendarLog', {});   // { 'YYYY-MM-DD': [entries] }
+let selected = todayKey();
+let view = new Date(); view.setDate(1);
+
+$('dows').innerHTML = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => `<div class="dow">${d}</div>`).join('');
+
+const sum = (list, k) => (list || []).reduce((a, e) => a + (+e[k] || 0), 0);
+
+function render() {
+  $('monthLabel').textContent = view.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const first = new Date(view.getFullYear(), view.getMonth(), 1);
+  const lead = (first.getDay() + 6) % 7;                       // Monday-first
+  const count = new Date(view.getFullYear(), view.getMonth() + 1, 0).getDate();
+  let html = '<div class="day empty"></div>'.repeat(lead);
+  for (let d = 1; d <= count; d++) {
+    const k = `${view.getFullYear()}-${pad(view.getMonth() + 1)}-${pad(d)}`;
+    const kcal = Math.round(sum(days[k], 'kcal'));
+    html += `<button class="day ${k === todayKey() ? 'today' : ''} ${k === selected ? 'sel' : ''}" data-k="${k}">${d}${kcal ? `<small>${kcal}</small>` : ''}</button>`;
+  }
+  $('grid').innerHTML = html;
+  $('grid').querySelectorAll('.day[data-k]').forEach(b => b.onclick = () => { selected = b.dataset.k; render(); });
+
+  const list = days[selected] || [];
+  $('dayTitle').textContent = new Date(selected + 'T00:00').toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+  $('totals').innerHTML = list.length
+    ? `<p><strong>${Math.round(sum(list, 'kcal'))} kcal</strong> · P ${sum(list, 'p').toFixed(1)} g · C ${sum(list, 'c').toFixed(1)} g · F ${sum(list, 'f').toFixed(1)} g</p>` : '';
+  $('entries').innerHTML = list.length ? list.map((e, i) => `
+    <div class="item"><div>${esc(e.name)} (${e.grams} g)
+      <small>${Math.round(e.kcal)} kcal · P ${(+e.p).toFixed(1)} · C ${(+e.c).toFixed(1)} · F ${(+e.f).toFixed(1)}</small></div>
+      <button data-i="${i}">Delete</button></div>`).join('') : '<p>No food logged for this day. Import a CSV below.</p>';
+  $('entries').querySelectorAll('button[data-i]').forEach(b => b.onclick = () => {
+    days[selected].splice(+b.dataset.i, 1); if (!days[selected].length) delete days[selected];
+    save('calendarLog', days); render();
+  });
+}
+
+$('prev').onclick = () => { view.setMonth(view.getMonth() - 1); render(); };
+$('next').onclick = () => { view.setMonth(view.getMonth() + 1); render(); };
+$('todayBtn').onclick = () => { selected = todayKey(); view = new Date(); view.setDate(1); render(); };
+$('clearDay').onclick = () => {
+  if (days[selected] && confirm('Remove all entries from this day?')) { delete days[selected]; save('calendarLog', days); render(); }
+};
+
+// ---- CSV parsing (handles quoted fields) ----
+function parseCSV(text) {
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += c;
+  }
+  if (cur || row.length) { row.push(cur); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim()));
+}
+
+$('importBtn').onclick = () => $('csvFile').click();
+$('csvFile').onchange = async e => {
+  const file = e.target.files[0]; if (!file) return;
+  const rows = parseCSV((await file.text()).replace(/^\uFEFF/, ''));
+  const head = rows.shift()?.map(h => h.trim().toLowerCase()) || [];
+  const col = n => head.indexOf(n);
+  if (col('name') < 0 || col('kcal') < 0) { $('msg').textContent = 'This doesn\'t look like the tracker\'s CSV. Expected columns: date, name, grams, kcal, protein_g, carbs_g, fat_g.'; e.target.value = ''; return; }
+  let added = 0, skipped = 0, firstDay = null;
+  for (const r of rows) {
+    const fileDate = (r[col('date')] || '').trim();
+    const day = $('useSelected').checked || !/^\d{4}-\d{2}-\d{2}$/.test(fileDate) ? selected : fileDate;
+    const entry = { name: r[col('name')], grams: +r[col('grams')] || 0, kcal: +r[col('kcal')] || 0, p: +r[col('protein_g')] || 0, c: +r[col('carbs_g')] || 0, f: +r[col('fat_g')] || 0 };
+    const list = (days[day] ||= []);
+    if (list.some(x => JSON.stringify(x) === JSON.stringify(entry))) { skipped++; continue; }
+    list.push(entry); added++; firstDay ||= day;
+  }
+  save('calendarLog', days);
+  $('msg').style.color = '';
+  $('msg').textContent = `Added ${added} item${added === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} already logged` : ''}.`;
+  if (firstDay && !$('useSelected').checked) { selected = firstDay; view = new Date(firstDay + 'T00:00'); view.setDate(1); }
+  e.target.value = ''; render();
+};
+
+render();
+</script>
+</body>
+</html>
